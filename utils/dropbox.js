@@ -245,12 +245,20 @@ async function uploadToDropbox(fileBuffer, folder = '/resumes', filename = null,
     }
 
     // Convert shared link to direct download link if needed
-    if (sharedLink && sharedLink.includes('dropbox.com/s/')) {
+    // Handle both /s/ (old format) and /scl/fi/ (new format) URLs
+    if (sharedLink && (sharedLink.includes('dropbox.com/s/') || sharedLink.includes('dropbox.com/scl/fi/'))) {
       // Replace ?dl=0 with ?dl=1 for direct download
       sharedLink = sharedLink.replace('?dl=0', '?dl=1');
       // Add ?dl=1 if no query parameter exists
       if (!sharedLink.includes('?dl=')) {
-        sharedLink += '?dl=1';
+        // Check if URL already has query parameters
+        const urlParts = sharedLink.split('?');
+        if (urlParts.length > 1) {
+          // Remove existing query params and add ?dl=1
+          sharedLink = urlParts[0] + '?dl=1';
+        } else {
+          sharedLink += '?dl=1';
+        }
       }
     }
 
@@ -335,6 +343,11 @@ async function getSharedLink(dropboxPath) {
   // Ensure path starts with /
   const path = dropboxPath.startsWith('/') ? dropboxPath : `/${dropboxPath}`;
 
+  // Validate that path is a file, not a folder (should have a file extension or filename)
+  if (path === '/resumes' || path.endsWith('/') || !path.includes('.')) {
+    throw new Error(`Invalid path: ${path} appears to be a folder, not a file`);
+  }
+
   try {
     // Try to get existing links first
     const existingLinks = await dbx.sharingListSharedLinks({
@@ -344,11 +357,22 @@ async function getSharedLink(dropboxPath) {
     
     if (existingLinks.links && existingLinks.links.length > 0) {
       let url = existingLinks.links[0].url;
-      // Convert to direct download link
-      if (url.includes('dropbox.com/s/')) {
+      // Validate it's a file URL, not a folder URL
+      if (url.includes('/home/')) {
+        throw new Error(`Got folder URL instead of file URL: ${url}`);
+      }
+      // Convert to direct download link for both /s/ and /scl/fi/ formats
+      if (url.includes('dropbox.com/s/') || url.includes('dropbox.com/scl/fi/')) {
         url = url.replace('?dl=0', '?dl=1');
+        // Remove other query parameters and add ?dl=1 if not present
         if (!url.includes('?dl=')) {
-          url += '?dl=1';
+          // Check if URL already has query parameters
+          const urlParts = url.split('?');
+          if (urlParts.length > 1) {
+            url = urlParts[0] + '?dl=1';
+          } else {
+            url += '?dl=1';
+          }
         }
       }
       return url;
@@ -363,11 +387,22 @@ async function getSharedLink(dropboxPath) {
     });
     
     let url = linkResult.url;
-    // Convert to direct download link
-    if (url.includes('dropbox.com/s/')) {
+    // Validate it's a file URL, not a folder URL
+    if (url.includes('/home/')) {
+      throw new Error(`Created folder URL instead of file URL: ${url}`);
+    }
+    // Convert to direct download link for both /s/ and /scl/fi/ formats
+    if (url.includes('dropbox.com/s/') || url.includes('dropbox.com/scl/fi/')) {
       url = url.replace('?dl=0', '?dl=1');
+      // Remove other query parameters and add ?dl=1 if not present
       if (!url.includes('?dl=')) {
-        url += '?dl=1';
+        // Check if URL already has query parameters
+        const urlParts = url.split('?');
+        if (urlParts.length > 1) {
+          url = urlParts[0] + '?dl=1';
+        } else {
+          url += '?dl=1';
+        }
       }
     }
     return url;

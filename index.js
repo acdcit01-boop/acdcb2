@@ -8,6 +8,7 @@ const fs = require('fs');
 const multer = require('multer');
 const { uploadToCloudinary, isCloudinaryConfigured, deleteFromCloudinary } = require('./utils/cloudinary');
 const { uploadToDropbox, isDropboxConfigured, deleteFromDropbox, getDropboxClient, setDatabase } = require('./utils/dropbox');
+const { uploadToSupabase, isSupabaseConfigured, deleteFromSupabase, getSupabaseUrl } = require('./utils/supabase');
 const { Dropbox } = require('dropbox');
 // Load database module - wrap in try-catch to prevent crashes on startup
 let db;
@@ -4670,64 +4671,74 @@ app.post('/api/applications', upload.single('resume'), async (req, res) => {
       bufferLength: req.file.buffer?.length
     } : 'No file');
 
-    // Handle file upload - upload to Dropbox for resumes
+    // Handle file upload - ALWAYS upload to Supabase Storage for resume (no Cloudinary fallback)
     if (req.file) {
-      if (isDropboxConfigured()) {
-        try {
-          // Validate file exists and has content
-          if (!req.file.buffer) {
-            throw new Error('File buffer is missing');
-          }
+      // Check if Supabase is configured - REQUIRED for resume uploads
+      if (!isSupabaseConfigured()) {
+        console.error('❌ Supabase not configured! resume must be stored in Supabase Storage.');
+        console.error('   Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment variables');
+        return res.status(500).json({
+          success: false,
+          message: 'Resume storage not configured. Please configure Supabase Storage.',
+          error: 'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for resume uploads'
+        });
+      }
 
-          if (req.file.buffer.length === 0) {
-            throw new Error('File buffer is empty (0 bytes)');
-          }
-
-          console.log(`📤 Preparing Dropbox upload: ${req.file.size} bytes`);
-
-          // Generate filename with original extension
-          const originalName = req.file.originalname || 'resume';
-          const ext = path.extname(originalName) || '.pdf';
-          const baseName = path.basename(originalName, ext)
-            .replace(/[^a-zA-Z0-9]/g, '_')
-            .substring(0, 50) || 'resume'; // Limit name length
-          const timestamp = Date.now();
-          const filename = `${baseName}_${timestamp}${ext}`;
-
-          console.log(`📁 Upload filename: ${filename}`);
-
-          // Upload to Dropbox in /resumes folder
-          // Try to use admin's Dropbox token if available, otherwise use env token
-          const userId = req.user?.id || null;
-          const dropboxResult = await uploadToDropbox(req.file.buffer, '/resumes', filename, userId);
-          
-          // Store Dropbox path in database (can be used to retrieve file later)
-          resumePath = dropboxResult.path;
-          
-          console.log(`✅ Resume uploaded to Dropbox successfully`);
-          console.log(`   Path: ${dropboxResult.path}`);
-          console.log(`   URL: ${dropboxResult.url}`);
-        } catch (error) {
-          console.error('❌ Dropbox upload failed:', error.message);
-          console.error('   Stack:', error.stack);
-          
-          // Return detailed error to help debug
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload resume to Dropbox',
-            error: error.message,
-            details: process.env.NODE_ENV === 'development' ? {
-              fileSize: req.file?.size,
-              hasBuffer: !!req.file?.buffer,
-              bufferLength: req.file?.buffer?.length,
-              dropboxConfigured: isDropboxConfigured()
-            } : undefined
-          });
+      try {
+        // Validate file exists and has content
+        if (!req.file.buffer) {
+          throw new Error('File buffer is missing');
         }
-      } else {
-        console.log('⚠️  Dropbox not configured, using fallback storage');
-        // Fallback to Cloudinary or local storage if Dropbox not configured
-        resumePath = await handleFileOrUrl(req, 'acdc-files/resumes');
+
+        if (req.file.buffer.length === 0) {
+          throw new Error('File buffer is empty (0 bytes)');
+        }
+
+        console.log(`📤 Preparing Supabase upload: ${req.file.size} bytes`);
+
+        // Get first_name and last_name from request body for filename
+        const firstName = (req.body?.first_name || '').trim().replace(/[^a-zA-Z0-9]/g, '_') || 'firstname';
+        const lastName = (req.body?.last_name || '').trim().replace(/[^a-zA-Z0-9]/g, '_') || 'lastname';
+        
+        // Generate filename as firstname_lastname with original extension
+        const originalName = req.file.originalname || 'resume';
+        const ext = path.extname(originalName) || '.pdf';
+        
+        // Create filename: firstname_lastname.ext
+        const filename = `${firstName}_${lastName}${ext}`;
+        
+        // Create file path in Supabase Storage: resume/firstname_lastname.ext
+        const filePath = `resume/${filename}`;
+
+        console.log(`📁 Upload filename: ${filePath}`);
+
+        // Upload to Supabase Storage
+        const supabaseResult = await uploadToSupabase(req.file.buffer, 'resume', filePath);
+        
+        // Store Supabase path in database (resume/firstname_lastname.ext)
+        resumePath = supabaseResult.path;
+        
+        console.log(`✅ Resume uploaded to Supabase successfully`);
+        console.log(`   Path: ${supabaseResult.path}`);
+        console.log(`   URL: ${supabaseResult.url}`);
+      } catch (error) {
+        console.error('❌ Supabase upload failed:', error.message);
+        console.error('   Stack:', error.stack);
+        
+        // Return detailed error to help debug
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to upload resume to Supabase Storage',
+          error: error.message,
+          details: process.env.NODE_ENV === 'development' ? {
+            fileSize: req.file?.size,
+            hasBuffer: !!req.file?.buffer,
+            bufferLength: req.file?.buffer?.length,
+            supabaseConfigured: isSupabaseConfigured(),
+            supabaseUrl: process.env.SUPABASE_URL ? 'Set' : 'Missing',
+            supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Set' : 'Missing'
+          } : undefined
+        });
       }
     } else {
       // Check for URL in request body (for backward compatibility)
@@ -4772,7 +4783,7 @@ app.post('/api/applications', upload.single('resume'), async (req, res) => {
     }
 
     // Insert application with IST timestamp
-    // Store Dropbox path in resume_filename field
+    // Store Supabase path in resume_filename field
     const insertApplication = db.prepare(`
       INSERT INTO job_applications (position_id, first_name, last_name, contact_number, email, about_yourself, resume_filename, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -4785,7 +4796,7 @@ app.post('/api/applications', upload.single('resume'), async (req, res) => {
       trimmedContactNumber,
       trimmedEmail,
       trimmedAboutYourself,
-      resumePath, // Store Dropbox path
+      resumePath, // Store Supabase path (e.g., resume/firstname_lastname.pdf)
       getISTTimestamp()
     );
 
@@ -4821,18 +4832,37 @@ app.get('/api/applications', authenticateToken, requireAdmin, async (req, res) =
     const applications = await getApplications.all();
     console.log(`Fetched ${applications.length} applications from database`);
 
-    // Process resumes - handle Dropbox paths, Cloudinary URLs, Base64, and local files
+    // Process resume - handle Supabase paths, Dropbox paths, Cloudinary URLs, Base64, and local files
     const applicationsWithResumeUrls = await Promise.all(applications.map(async (app) => {
       let resumeUrl = null;
       if (app.resume_filename) {
-        // Check if it's a Dropbox path (starts with /)
-        if (isDropboxConfigured() && app.resume_filename.startsWith('/')) {
+        // Check if it's already a full URL (http/https)
+        if (app.resume_filename.startsWith('http://') || app.resume_filename.startsWith('https://')) {
+          // Already a URL, use it directly
+          resumeUrl = app.resume_filename;
+        }
+        // Check if it's a Supabase path (starts with 'resume/')
+        else if (isSupabaseConfigured() && app.resume_filename.startsWith('resume/')) {
+          try {
+            resumeUrl = getSupabaseUrl(app.resume_filename, 'resume');
+            if (!resumeUrl) {
+              throw new Error('Failed to get Supabase URL');
+            }
+          } catch (error) {
+            console.error('Error getting Supabase URL:', error.message);
+            // Fallback to API endpoint
+            resumeUrl = `${getApiUrl()}/applications/${app.id}/resume`;
+          }
+        }
+        // Check if it's a Dropbox path (starts with /) - for backward compatibility
+        else if (isDropboxConfigured() && app.resume_filename.startsWith('/')) {
           try {
             const { getSharedLink } = require('./utils/dropbox');
             resumeUrl = await getSharedLink(app.resume_filename);
           } catch (error) {
             console.error('Error getting Dropbox shared link:', error.message);
-            resumeUrl = app.resume_filename; // Fallback to path
+            // Don't fallback to path - use API endpoint instead
+            resumeUrl = `${getApiUrl()}/applications/${app.id}/resume`;
           }
         } else {
           // Use existing getFileUrl for Cloudinary URLs, Base64, or local files
@@ -4874,10 +4904,19 @@ app.delete('/api/applications/:id', authenticateToken, requireAdmin, async (req,
       });
     }
 
-    // Delete resume file from storage (Dropbox, Cloudinary, or local)
+    // Delete resume file from storage (Supabase, Dropbox, Cloudinary, or local)
     if (application.resume_filename) {
-      // Check if it's a Dropbox path
-      if (isDropboxConfigured() && application.resume_filename.startsWith('/')) {
+      // Check if it's a Supabase path
+      if (isSupabaseConfigured() && application.resume_filename.startsWith('resume/')) {
+        try {
+          await deleteFromSupabase(application.resume_filename, 'resume');
+        } catch (error) {
+          console.error('Error deleting resume from Supabase:', error);
+          // Continue with deletion even if Supabase deletion fails
+        }
+      }
+      // Check if it's a Dropbox path (for backward compatibility)
+      else if (isDropboxConfigured() && application.resume_filename.startsWith('/')) {
         try {
           await deleteFromDropbox(application.resume_filename);
         } catch (error) {
@@ -4978,7 +5017,8 @@ app.put('/api/applications/:id/status', authenticateToken, requireAdmin, async (
 app.get('/api/applications/:id/resume', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const getApplication = db.prepare('SELECT resume_filename FROM job_applications WHERE id = ?');
+    const { download } = req.query; // Check if download parameter is present
+    const getApplication = db.prepare('SELECT resume_filename, first_name, last_name FROM job_applications WHERE id = ?');
     const application = await getApplication.get(parseInt(id));
 
     if (!application || !application.resume_filename) {
@@ -4989,19 +5029,116 @@ app.get('/api/applications/:id/resume', authenticateToken, requireAdmin, async (
     }
 
     const resumeData = application.resume_filename;
+    const firstName = application.first_name || 'firstname';
+    const lastName = application.last_name || 'lastname';
+    const downloadFilename = `${firstName}_${lastName}.pdf`;
 
-    // Check if it's a Dropbox path (starts with /)
+    // Check if it's already a full URL (http/https)
+    if (resumeData.startsWith('http://') || resumeData.startsWith('https://')) {
+      // Validate it's not a folder URL
+      if (resumeData.includes('/home/')) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid resume URL: folder URL detected'
+        });
+      }
+      
+      // If download is requested and it's a Supabase URL, download from Supabase Storage
+      if (download === 'true' && resumeData.includes('supabase.co')) {
+        try {
+          // Extract the file path from Supabase URL
+          // Supabase URLs format: https://project.supabase.co/storage/v1/object/public/bucket/path
+          const urlMatch = resumeData.match(/\/storage\/v1\/object\/public\/([^\/]+)\/(.+)$/);
+          if (urlMatch) {
+            const bucketName = urlMatch[1];
+            const filePath = decodeURIComponent(urlMatch[2]);
+            
+            // Download from Supabase Storage
+            const { downloadFromSupabase } = require('./utils/supabase');
+            const fileBuffer = await downloadFromSupabase(filePath, bucketName);
+            
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+            res.send(fileBuffer);
+            return;
+          }
+        } catch (error) {
+          console.error('Error downloading from Supabase URL:', error.message);
+          // Fallback to redirect with download header
+        }
+      }
+      
+      // If download is requested, set Content-Disposition header and redirect
+      if (download === 'true') {
+        res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+        return res.redirect(resumeData);
+      }
+      
+      // Redirect directly to the URL (for viewing)
+      return res.redirect(resumeData);
+    }
+
+    // Check if it's a Supabase path (starts with 'resume/')
+    if (isSupabaseConfigured() && resumeData.startsWith('resume/')) {
+      try {
+        const { downloadFromSupabase } = require('./utils/supabase');
+        
+        // If download is requested, fetch file and serve with download headers
+        if (download === 'true') {
+          try {
+            const fileBuffer = await downloadFromSupabase(resumeData, 'resume');
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+            res.send(fileBuffer);
+            return;
+          } catch (downloadError) {
+            console.error('Error downloading from Supabase:', downloadError.message);
+            // Fallback to redirect if download fails
+            const supabaseUrl = getSupabaseUrl(resumeData, 'resume');
+            if (supabaseUrl) {
+              res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+              return res.redirect(supabaseUrl);
+            }
+            throw downloadError;
+          }
+        }
+        
+        // For viewing, get public URL and redirect
+        const supabaseUrl = getSupabaseUrl(resumeData, 'resume');
+        if (!supabaseUrl) {
+          throw new Error('Failed to get Supabase URL');
+        }
+        
+        // Redirect to Supabase public URL
+        return res.redirect(supabaseUrl);
+      } catch (error) {
+        console.error('Error getting Supabase URL:', error.message);
+        return res.status(500).json({
+          success: false,
+          message: 'Error accessing resume from Supabase: ' + error.message
+        });
+      }
+    }
+
+    // Check if it's a Dropbox path (starts with /) - for backward compatibility
     if (isDropboxConfigured() && resumeData.startsWith('/')) {
       try {
         const { getSharedLink } = require('./utils/dropbox');
         const dropboxUrl = await getSharedLink(resumeData);
+        // Validate it's not a folder URL before redirecting
+        if (dropboxUrl.includes('/home/')) {
+          return res.status(500).json({
+            success: false,
+            message: 'Error: Got folder URL instead of file URL'
+          });
+        }
         // Redirect to Dropbox download URL
         return res.redirect(dropboxUrl);
       } catch (error) {
         console.error('Error getting Dropbox shared link:', error.message);
         return res.status(500).json({
           success: false,
-          message: 'Error accessing resume from Dropbox'
+          message: 'Error accessing resume from Dropbox: ' + error.message
         });
       }
     }
@@ -5043,7 +5180,7 @@ app.get('/api/applications/:id/resume', authenticateToken, requireAdmin, async (
 
     // Legacy filename - try to read from uploads directory
     try {
-      const filePath = path.join(__dirname, 'uploads', 'resumes', resumeData);
+      const filePath = path.join(__dirname, 'uploads', 'resume', resumeData);
       if (fs.existsSync(filePath)) {
         const fileBuffer = fs.readFileSync(filePath);
         res.setHeader('Content-Type', 'application/pdf');
