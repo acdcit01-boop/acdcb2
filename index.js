@@ -7,15 +7,11 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { uploadToCloudinary, isCloudinaryConfigured, deleteFromCloudinary } = require('./utils/cloudinary');
-const { uploadToDropbox, isDropboxConfigured, deleteFromDropbox, getDropboxClient, setDatabase } = require('./utils/dropbox');
 const { uploadToSupabase, isSupabaseConfigured, deleteFromSupabase, getSupabaseUrl } = require('./utils/supabase');
-const { Dropbox } = require('dropbox');
 // Load database module - wrap in try-catch to prevent crashes on startup
 let db;
 try {
   db = require('./database');
-  // Set database instance for Dropbox utility
-  setDatabase(db);
 } catch (error) {
   console.error('Error loading database module:', error);
   // Create a mock db object to prevent crashes - will fail gracefully in routes
